@@ -1,0 +1,254 @@
+﻿@using Sandbox
+@using Sandbox.UI
+@using System
+@using System.Collections.Generic
+@using System.IO
+@using System.Linq
+@namespace MenuProject.Settings
+@inherits Panel
+
+<root class="page-inner">
+	<div class="page-content">
+		<div class="storage-content">
+			<div class="storage-overview">
+				<div class="storage-overview-heading">
+					<div class="storage-drive"><i>storage</i></div>
+					<div class="storage-overview-title">
+						<label class="storage-heading">Downloaded content</label>
+						<label class="storage-secondary">Kept on this device so your games load faster.</label>
+					</div>
+					<div class="storage-total">
+						<label class="storage-value">@(HasSnapshot ? FormatSize( Size ) : "Calculating…")</label>
+						<label class="storage-secondary">@(HasSnapshot ? "used by downloads" : "Reading your cache")</label>
+					</div>
+				</div>
+
+				<div class="storage-usage-bar">
+					@foreach ( var entry in SizeBreakdown.OrderByDescending( x => x.Value ) )
+					{
+						<div class="storage-segment file-type-@Slug( entry.Key )" style="flex-grow: @entry.Value;" title="@($"{entry.Key}: {FormatSize( entry.Value )}")"></div>
+					}
+				</div>
+				<div class="storage-overview-footer">
+					<label class="storage-secondary">@(IsRefreshing ? $"Scanning… {ScannedFiles:N0} files" : $"{Files:N0} cached files")</label>
+					<Button class="storage-refresh" Disabled=@Busy onclick=@TryRefresh>Refresh</Button>
+				</div>
+			</div>
+
+			@if ( !string.IsNullOrEmpty( ErrorMessage ) )
+			{
+				<div class="storage-error"><i>error_outline</i><label>@ErrorMessage</label></div>
+			}
+
+			@if ( HasSnapshot )
+			{
+				<div class="storage-section">
+					<label class="storage-section-title">Recommendations</label>
+					<div class="storage-group storage-cleanup">
+						<div class="storage-recommendation">
+							<div class="storage-cleanup-icon"><i>@(OldSize > 0 ? "auto_delete" : "check_circle")</i></div>
+							<div class="storage-recommendation-copy">
+								<label class="storage-heading">@(OldSize > 0 ? "Remove unused downloads" : "You're up to date")</label>
+								<label class="storage-secondary">@(OldSize > 0 ? $"Free up to {FormatSize( OldSize )}. These files haven't been accessed in {DaysAgo} days." : $"All cached content has been accessed in the last {DaysAgo} days.")</label>
+							</div>
+							@if ( OldSize > 0 )
+							{
+								<Button class="storage-action" Disabled=@(!CanClear || ConfirmCleanup) onclick=@RequestCleanup>@(IsClearing ? "Removing…" : "Remove…")</Button>
+							}
+						</div>
+						@if ( ConfirmCleanup )
+						{
+							<div class="storage-confirmation">
+								<label class="storage-heading">Remove @FormatSize( OldSize ) of unused downloads?</label>
+								<label class="storage-secondary">Your saved data won't be touched. Games may take longer to load while removed content downloads again.</label>
+								<div class="storage-confirmation-actions">
+									<Button class="storage-action" onclick=@CancelCleanup>Cancel</Button>
+									<Button class="storage-action storage-destructive" Disabled=@(!CanClear) onclick=@ClearUnused>Remove Downloads</Button>
+								</div>
+							</div>
+						}
+					</div>
+					<label class="storage-footnote">Removed content downloads again when you need it. Saved data is not affected.</label>
+				</div>
+
+				<div class="storage-section">
+					<div class="storage-section-heading">
+						<label class="storage-section-title">Content by type</label>
+						<label class="storage-secondary">Largest first</label>
+					</div>
+					<div class="storage-group storage-rows">
+						@foreach ( var entry in SizeBreakdown.OrderByDescending( x => x.Value ) )
+						{
+							<div class="storage-type-row">
+								<div class="storage-type-icon file-type-@Slug( entry.Key )"><i>@TypeIcon( entry.Key )</i></div>
+								<label class="storage-type-name">@entry.Key</label>
+								<label class="storage-type-size">@FormatSize( entry.Value )</label>
+							</div>
+						}
+						@if ( Files == 0 )
+						{
+							<div class="storage-empty">
+								<label class="storage-heading">No downloaded content</label>
+								<label class="storage-secondary">Content will appear here as you play.</label>
+							</div>
+						}
+					</div>
+					<label class="storage-footnote">This includes downloaded content only, not the s&amp;box installation or your saved data.</label>
+				</div>
+			}
+		</div>
+	</div>
+</root>
+
+@code
+{
+	const int DaysAgo = 7;
+
+	Dictionary<string, long> SizeBreakdown = new();
+	bool IsRefreshing = true;
+	bool IsClearing;
+	bool HasSnapshot;
+	bool ConfirmCleanup;
+	long ScannedFiles;
+	DateTime ScanCutoff;
+	string ErrorMessage = "";
+	long Files;
+	long Size;
+	long OldSize;
+	bool Busy => IsRefreshing || IsClearing;
+	bool CanClear => HasSnapshot && !Busy && OldSize > 0 && string.IsNullOrEmpty( ErrorMessage );
+
+	protected override void OnAfterTreeRender( bool firstTime )
+	{
+		base.OnAfterTreeRender( firstTime );
+		if ( firstTime ) _ = Refresh();
+	}
+
+	void RequestCleanup()
+	{
+		if ( !CanClear ) return;
+		ConfirmCleanup = true;
+		StateHasChanged();
+	}
+
+	void CancelCleanup()
+	{
+		ConfirmCleanup = false;
+		StateHasChanged();
+	}
+
+	async Task ClearUnused()
+	{
+		if ( !CanClear || !ConfirmCleanup ) return;
+
+		IsClearing = true;
+		ConfirmCleanup = false;
+		ErrorMessage = "";
+		StateHasChanged();
+
+		try
+		{
+			await MenuUtility.Storage.FlushAsync( ScanCutoff );
+			await Refresh();
+		}
+		catch ( Exception e )
+		{
+			ErrorMessage = $"Couldn't remove unused files: {e.Message}";
+		}
+		finally
+		{
+			IsClearing = false;
+			StateHasChanged();
+		}
+	}
+
+	void TryRefresh()
+	{
+		if ( IsRefreshing || IsClearing ) return;
+		_ = Refresh();
+	}
+
+	async Task Refresh()
+	{
+		IsRefreshing = true;
+		ConfirmCleanup = false;
+		ErrorMessage = "";
+		ScannedFiles = 0;
+		StateHasChanged();
+
+		try
+		{
+			var cutoff = DateTime.Now.AddDays( -DaysAgo );
+			var sw = System.Diagnostics.Stopwatch.StartNew();
+			var breakdown = new Dictionary<string, long>();
+			long files = 0, size = 0, oldSize = 0;
+
+			foreach ( var entry in MenuUtility.Storage.GetStorageFiles() )
+			{
+				files++;
+				size += entry.Size;
+				if ( entry.LastAccessed < cutoff ) oldSize += entry.Size;
+
+				var type = FileType( entry.Filename );
+				breakdown[type] = breakdown.GetValueOrDefault( type ) + entry.Size;
+
+				if ( sw.ElapsedMilliseconds < 16 ) continue;
+				ScannedFiles = files;
+				sw.Restart();
+				await Task.DelayRealtime( 1 );
+				StateHasChanged();
+			}
+
+			SizeBreakdown = breakdown;
+			Files = files;
+			Size = size;
+			OldSize = oldSize;
+			ScanCutoff = cutoff;
+			HasSnapshot = true;
+		}
+		catch ( Exception e )
+		{
+			ErrorMessage = $"Couldn't read storage: {e.Message}";
+		}
+		finally
+		{
+			IsRefreshing = false;
+			StateHasChanged();
+		}
+	}
+
+	static string FileType( string filename ) => Path.GetExtension( filename ).ToLowerInvariant() switch
+	{
+		".vpk" => "Maps",
+		".vtex" or ".vtex_c" => "Textures",
+		".shader" or ".shader_c" => "Shaders",
+		".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" => "Images",
+		".mp4" or ".webm" => "Videos",
+		".vmt" or ".vmat" or ".vmat_c" => "Materials",
+		".vmdl" or ".vmdl_c" => "Models",
+		".vsnd" or ".vsnd_c" or ".sound" or ".sound_c" => "Sounds",
+		_ => "Other"
+	};
+
+	static string Slug( string value ) => value.ToLowerInvariant();
+
+	static string FormatSize( long bytes )
+	{
+		var formatted = bytes.FormatBytes();
+		var suffixLength = bytes >= 1024 ? 2 : 1;
+		return $"{formatted[..^suffixLength]} {formatted[^suffixLength..].ToUpperInvariant()}";
+	}
+
+	static string TypeIcon( string type ) => type switch
+	{
+		"Textures" => "texture",
+		"Models" => "view_in_ar",
+		"Sounds" => "music_note",
+		"Maps" => "map",
+		"Materials" => "palette",
+		"Images" => "image",
+		"Shaders" => "auto_awesome",
+		"Videos" => "videocam",
+		_ => "folder"
+	};
+}

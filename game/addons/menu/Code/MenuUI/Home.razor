@@ -1,0 +1,151 @@
+@using MenuProject.MenuUI.ContentBlock
+@using MenuProject.MenuUI.Front
+@using MenuProject.MenuUI.Layout
+@using Sandbox;
+@using Sandbox.UI;
+@using MenuProject.UI;
+@page "/home"
+@inherits Panel
+
+<root class="home">
+	<Page>
+		<Body>
+			<div class="home-row">
+
+				<div class="feed">
+
+					@* Feeds live with the page they change - leave the front page and they go with it. *@
+					<div class="tabs">
+						@foreach ( var tab in Tabs )
+						{
+							<Button Href="@tab.Url" Active="@(CurrentTab == tab)">@tab.Title</Button>
+						}
+
+						<separator class="vertical" />
+
+						@foreach ( var tab in Genres )
+						{
+							<Button Href="@tab.Url" Active="@(CurrentTab == tab)">@tab.Title</Button>
+						}
+					</div>
+
+					@if ( CurrentTab.IsDiscover )
+					{
+						@if (Result is null)
+						{
+							<LoadingPanel></LoadingPanel>
+						}
+						else
+						{
+							<FrontPageGames Group="@Result" />
+						}
+					}
+					else
+					{
+						<MenuProject.UI.PackageList Surface="home" Shelf=@CurrentTab.Name Query=@($"type:game {CurrentTab.Query}") Take=@(60) OnSelected=@Selected OnMenu=@Menu></MenuProject.UI.PackageList>
+					}
+				</div>
+
+				<div class="aside">
+
+					@*
+						One card - avatar, stats, your friends taking the rest of the column, and your
+						party along the bottom when you're in one.
+					*@
+					<div class="profile-card">
+						<AvatarButton />
+						<ProfileStats />
+						<FriendsRail />
+
+						@* Room for the party deck, which floats over this from the menu overlay (so it can stay
+						   above modals) and sets its height - see Footer.razor. Always here, just hidden when
+						   there's no party, so the deck's reference to it never goes stale. *@
+						<div class="party-slot @(PartyView.Exists ? "" : "hidden")" @ref="PartySlot"></div>
+					</div>
+
+				</div>
+
+			</div>
+		</Body>
+	</Page>
+</root>
+
+@code
+{
+	/// <summary>The curated content-block group shown on the front page.</summary>
+	public const string ContentGroupId = "32790afe-3968-4c13-b01a-39fbe36e7dd2";
+
+	/// <summary>
+	/// A feed the front page can show. Discover is the curated blocks, the rest run a
+	/// package query - Query is everything after "type:game".
+	/// </summary>
+	public record FeedTab( string Name, string Title, string Query )
+	{
+		public bool IsDiscover => Query is null;
+		public string Url => $"/home?Tab={Name}";
+	}
+
+	/// <summary>The feeds offered in the top bar, in order.</summary>
+	public static readonly FeedTab[] Tabs =
+	[
+		new( "discover", "Discover", null ),
+		new( "trending", "Trending", "sort:trending" ),
+		new( "popular", "Popular", "sort:rankmonth" ),
+		new( "newest", "Newest", "sort:newest" ),
+		new( "updated", "Updated", "sort:updated" ),
+		new( "gems", "Hidden Gems", "sort:hiddengem" ),
+	];
+
+	/// <summary>Genre feeds, shown after the main tabs. Best-rated first within each genre.</summary>
+	public static readonly FeedTab[] Genres =
+	[
+		new( "shooter", "Shooter", "sort:quality genre:shooter" ),
+		new( "puzzle", "Puzzle", "sort:quality genre:puzzle" ),
+		new( "strategy", "Strategy", "sort:quality genre:strategy" ),
+		new( "sports", "Sports", "sort:quality genre:sports" ),
+		new( "roguelike", "Roguelike", "sort:quality genre:roguelike" ),
+	];
+
+	static FeedTab FindTab( string name ) => Tabs.Concat( Genres ).FirstOrDefault( x => x.Name == name ) ?? Tabs[0];
+
+	/// <summary>The feed the front page is currently showing.</summary>
+	public static FeedTab CurrentTab { get; private set; } = Tabs[0];
+
+	// The navigator caches this page and re-applies query params through the
+	// setter on every visit, so the tab has to be picked here.
+	[Parameter]
+	public string Tab
+	{
+		get => field;
+		set
+		{
+			field = value;
+			CurrentTab = FindTab( value );
+		}
+	}
+
+	/// <summary>
+	/// The space at the bottom of the rail the party deck lines itself up with.
+	/// </summary>
+	public static Panel PartySlot { get; private set; }
+
+	Package.ListResult Result;
+
+	protected override async Task OnParametersSetAsync()
+	{
+		Result = await Package.ListAsync( ContentGroupId );
+		StateHasChanged();
+	}
+
+	void Selected( Package package )
+	{
+		ContentBlocks.OnLaunch( package );
+	}
+
+	void Menu( Package package )
+	{
+		ContentBlocks.OnMenu( this, package );
+	}
+
+	protected override int BuildHash() => System.HashCode.Combine( Result, CurrentTab, PartyView.Exists );
+}

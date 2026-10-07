@@ -1,0 +1,370 @@
+﻿using Sandbox;
+using Sandbox.DataModel;
+using Sandbox.Diagnostics;
+using Sandbox.Modals;
+using MenuProject.MenuUI.Front;
+using MenuPanel = MenuProject.UI.MenuPanel;
+
+public static class MenuHelpers
+{
+	/// <summary>
+	/// Do we have authority to start or join games.
+	/// If we're in a party, only the party owner can start or join games.
+	/// </summary>
+	public static bool HasAuthority => PartyRoom.Current?.Owner.IsMe ?? true;
+
+	/// <summary>
+	/// True when a discovery query lists a jam's entries, e.g. "jam:three type:game".
+	/// </summary>
+	public static bool IsJamQuery( string query )
+	{
+		if ( string.IsNullOrEmpty( query ) ) return false;
+
+		return query.Split( ' ', StringSplitOptions.RemoveEmptyEntries ).Any( x => x.StartsWith( "jam:", StringComparison.OrdinalIgnoreCase ) );
+	}
+
+	/// <summary>
+	/// General-purpose method to play a game package. Handles quickplay, dedicated servers,
+	/// create-game modal, VR-only checks, default map fetching, and direct launch.
+	/// </summary>
+	public static async void PlayGame( Package package, Package mapPackage = null )
+	{
+		Assert.True( HasAuthority, "You do not have authority to start a game, only the party owner can do that." );
+
+		// VR-only game but not in VR
+		if ( package.Info.IsVrOnly && !Application.IsVR )
+			return;
+
+		// QuickPlay: try to join an existing lobby first
+		if ( package.Info.IsQuickPlay )
+		{
+			await PrepareForLoad( "Finding Game..", "Please wait while we find a game for you to join." );
+
+			if ( await MenuUtility.TryJoinLobby( package.FullIdent ) )
+				return;
+
+			Log.Info( $"Couldn't join a lobby - making a game" );
+			LoadingScreen.IsVisible = false;
+		}
+		else if ( package.Info.IsDedicatedServerOnly )
+		{
+			// Dedicated server only: show server list
+			Game.Overlay.ShowServerList( new ServerListConfig( package.FullIdent ) );
+			return;
+		}
+
+		// Show create game modal if the package requires it
+		if ( ShouldUseCreateGameModal( package ) )
+		{
+			Game.Overlay.CreateGame( new CreateGameOptions( package, async x =>
+			{
+				if ( x.MaxPlayers > 0 ) LaunchArguments.MaxPlayers = x.MaxPlayers;
+
+				if ( !string.IsNullOrEmpty( x.ServerName ) )
+					LaunchArguments.ServerName = x.ServerName;
+
+				LaunchArguments.Privacy = x.Privacy;
+
+				// The create game modal's the one closing now - let it go before the load holds things up
+				await PrepareForLoad();
+
+				if ( !string.IsNullOrEmpty( x.Map ) )
+					MenuUtility.OpenGameWithMap( package.FullIdent, x.Map, x.GameSettings );
+				else
+					MenuUtility.OpenGame( package.FullIdent, true, x.GameSettings );
+			} ) );
+			return;
+		}
+
+		// Direct launch
+		await PrepareForLoad();
+
+		if ( mapPackage is null )
+		{
+			// Fetch the default map if one is configured
+			var defaultMap = package.Info.DefaultMap;
+			if ( !string.IsNullOrWhiteSpace( defaultMap ) )
+			{
+				Log.Info( $"DefaultMap configured, launching game with map: {defaultMap}" );
+				mapPackage = await Package.FetchAsync( defaultMap, false );
+			}
+		}
+
+		if ( mapPackage is not null )
+		{
+			MenuUtility.OpenGameWithMap( package.FullIdent, mapPackage.FullIdent );
+		}
+		else
+		{
+			MenuUtility.OpenGame( package.FullIdent, true );
+		}
+	}
+
+	/// <summary>
+	/// How long the screen gets to settle before a load starts - see <see cref="PrepareForLoad"/>.
+	/// </summary>
+	const int LoadWarmUpMilliseconds = 200;
+
+	/// <summary>
+	/// Get the screen ready for a load before starting it - modals closed, the loading screen up,
+	/// then a moment for both to actually draw. The first steps of a load can hold the main thread
+	/// for a while, and anything still animating when it does (a modal halfway through closing)
+	/// freezes on screen until it lets go.
+	/// </summary>
+	public static async Task PrepareForLoad( string title = "Loading..", string subtitle = "" )
+	{
+		MenuUtility.CloseAllModals();
+
+		LoadingScreen.IsVisible = true;
+		LoadingScreen.Title = title;
+		LoadingScreen.Subtitle = subtitle;
+
+		await Task.Delay( LoadWarmUpMilliseconds );
+	}
+
+	static bool ShouldUseCreateGameModal( Package package )
+	{
+		if ( package.Info.UsesCreateGameModal )
+			return true;
+
+		if ( package.Info.HasGameSettings )
+			return true;
+
+		return false;
+	}
+
+	public static string SANDBOX_IDENT => "facepunch.sandbox";
+
+	/// <summary>
+	/// Whole days since <paramref name="time"/>, formatted compactly - e.g. "1d", "7d", "764d".
+	/// </summary>
+	public static string DaysAgo( System.DateTimeOffset time )
+	{
+		var days = (int)System.Math.Floor( (System.DateTimeOffset.UtcNow - time).TotalDays );
+		if ( days < 0 ) days = 0;
+		return $"{days}d";
+	}
+
+	/// <summary>
+	/// "3 days ago", "2 weeks ago", "5 months ago", "2 years ago" - the biggest unit that fits, so
+	/// half a year reads as months, not 26 weeks.
+	/// </summary>
+	public static string TimeAgo( System.DateTimeOffset time )
+	{
+		var span = System.DateTimeOffset.UtcNow - time;
+		if ( span.TotalSeconds < 0 ) span = System.TimeSpan.Zero;
+
+		static string Plural( int n, string unit ) => $"{n} {unit}{(n == 1 ? "" : "s")} ago";
+
+		if ( span.TotalMinutes < 1 ) return "just now";
+		if ( span.TotalHours < 1 ) return Plural( (int)span.TotalMinutes, "minute" );
+		if ( span.TotalDays < 1 ) return Plural( (int)span.TotalHours, "hour" );
+		if ( span.TotalDays < 7 ) return Plural( (int)span.TotalDays, "day" );
+		if ( span.TotalDays < 30 ) return Plural( (int)(span.TotalDays / 7), "week" );
+		if ( span.TotalDays < 365 ) return Plural( System.Math.Max( (int)(span.TotalDays / 30.44), 1 ), "month" );
+		return Plural( (int)(span.TotalDays / 365.25), "year" );
+	}
+
+	/// <summary>
+	/// <see cref="TimeAgo(System.DateTimeOffset)"/> for a UTC <see cref="System.DateTime"/>.
+	/// </summary>
+	public static string TimeAgo( System.DateTime utc ) => TimeAgo( new System.DateTimeOffset( System.DateTime.SpecifyKind( utc, System.DateTimeKind.Utc ) ) );
+
+	public static MenuPanel OpenFriendMenu( Panel source, Friend friend )
+	{
+		var menu = MenuPanel.Open( source );
+
+		menu.AddOption( "contact_page", "View Profile", () => Game.Overlay.ShowPlayer( (long)friend.Id ) );
+
+		if ( !friend.IsFriend && !friend.IsMe )
+		{
+			menu.AddOption( "person_add", "Send Friend Request", friend.OpenAddFriendOverlay );
+		}
+
+		var me = new Friend( Game.SteamId );
+		var connectString = friend.GetRichPresence( "connect" );
+		var isInGame = !string.IsNullOrEmpty( connectString );
+		var inSameGame = isInGame && connectString == me.GetRichPresence( "connect" );
+		var canJoinGame = !string.IsNullOrEmpty( connectString );
+
+		if ( canJoinGame && !inSameGame )
+		{
+			menu.AddOption( "sports_esports", "Join Game", () => MenuUtility.JoinFriendGame( friend ) );
+		}
+
+		return menu;
+	}
+
+	public static void OpenPackageMenu( Panel source, Package package, bool multiplayerOverride = false )
+	{
+		if ( package.TypeName == "game" )
+			OpenGameMenu( source, package, multiplayerOverride );
+		else if ( package.TypeName == "map" )
+			OpenMapMenu( source, package );
+		else
+			Log.Info( $"Unknown package type: {package.TypeName}" );
+	}
+
+	static void OpenGameMenu( Panel source, Package package, bool multiplayerOverride = false )
+	{
+		var menu = MenuPanel.Open( source );
+
+		menu.AddOption( "play_arrow", "Open Game", () => LaunchGame( package.FullIdent ) );
+
+		if ( package.Tags.Contains( "maplaunch" ) )
+		{
+			menu.AddOption( "folder", "Open With Map..", () =>
+			{
+				Game.Overlay.ShowPackageSelector( $"type:map sort:trending target:{package.FullIdent}", ( p ) => MenuUtility.OpenGameWithMap( package.FullIdent, p.FullIdent ) );
+			} );
+		}
+
+		if ( multiplayerOverride || package.Tags.Contains( "multiplayer" ) || package.Info.MaxPlayers > 1 )
+		{
+			menu.AddSpacer();
+			menu.AddOption( "list", "View servers", () =>
+			{
+				Game.Overlay.ShowServerList( new Sandbox.Modals.ServerListConfig( package.FullIdent ) );
+			} );
+		}
+
+		menu.AddSpacer();
+		var liked = package.Interaction.Rating == 0;
+		var disliked = package.Interaction.Rating == 1;
+		var favourite = package.Interaction.Favourite;
+		menu.AddOption( "thumb_up", liked ? "Liked" : "Like", () => _ = package.SetVoteAsync( true ) );
+		menu.AddOption( "thumb_down", disliked ? "Disliked" : "Dislike", () => _ = package.SetVoteAsync( false ) );
+		menu.AddOption( favourite ? "favorite" : "favorite_border", favourite ? "Remove from Favourites" : "Add to Favourites", () => _ = package.SetFavouriteAsync( !favourite ) );
+
+		menu.AddSpacer();
+		menu.AddOption( "corporate_fare", $"View Creator", () => Game.Overlay.ShowOrganizationModal( package.Org ) );
+		menu.AddOption( "rate_review", "Review Game", () => Game.Overlay.ShowReviewModal( package ) );
+		menu.AddOption( "flag", "Report Game", () => Game.Overlay.ShowReportModal( package.FullIdent ) );
+		menu.AddOption( "block", "Hide Game", () => _ = HidePackage( source, package ) );
+	}
+
+	/// <summary>
+	/// Hide a game from this player's discovery and search. Toasts the result and drops the
+	/// tile from the front-page shelf it came from.
+	/// </summary>
+	public static async Task<bool> HidePackage( Panel source, Package package )
+	{
+		// Hover cards float in the root; their shelf is behind the hovered card
+		if ( source is MenuProject.UI.PackageHoverCard hoverCard )
+		{
+			source = hoverCard.Source;
+			hoverCard.Close();
+		}
+
+		var hidden = await package.SetHiddenAsync( true );
+
+		if ( hidden )
+		{
+			Toast( $"{package.Title} hidden", "visibility_off" );
+			source?.AncestorsAndSelf.OfType<FrontPageGames>().FirstOrDefault()?.RemovePackage( package );
+		}
+		else
+		{
+			Toast( $"Couldn't hide {package.Title} right now", "visibility_off" );
+		}
+
+		return hidden;
+	}
+
+	static void Toast( string title, string icon ) => MenuOverlay.Instance?.BottomRight?.Queue( new MenuProject.Toast() { Title = title, Icon = icon } );
+
+	static void OpenMapMenu( Panel source, Package package )
+	{
+		var menu = MenuPanel.Open( source );
+
+		async void OnPackageSelected( Package package )
+		{
+			Assert.True( HasAuthority, "You do not have authority to start a game, only the party owner can do that." );
+			LaunchArguments.Map = null;
+
+			var filters = new Dictionary<string, string>
+			{
+				{ "game", SANDBOX_IDENT },
+				{ "map", package.FullIdent },
+			};
+
+			var lobbies = await Networking.QueryLobbies( filters );
+
+			foreach ( var lobby in lobbies ) // TODO - order by most attractive
+			{
+				if ( lobby.IsFull ) continue;
+
+				if ( await Networking.TryConnectSteamId( lobby.LobbyId ) )
+					return;
+			}
+
+			CreateGameWithMap( SANDBOX_IDENT, package );
+		}
+
+		void ViewGameList( Package package )
+		{
+			Game.Overlay.ShowServerList( new Sandbox.Modals.ServerListConfig( null, package.FullIdent ) );
+		}
+
+		if ( HasAuthority )
+		{
+			menu.AddOption( "play_arrow", "Join existing session", () => OnPackageSelected( package ) );
+			menu.AddOption( "playlist_add", "Create own game", () => CreateGameWithMap( SANDBOX_IDENT, package ) );
+
+			menu.AddSpacer();
+		}
+
+		menu.AddOption( "list", "View servers", () => ViewGameList( package ) );
+
+		menu.AddSpacer();
+		menu.AddOption( "info", $"View Map Details", () => Game.Overlay.ShowPackageModal( package.FullIdent ) );
+		menu.AddOption( "corporate_fare", $"View Creator", () => Game.Overlay.ShowOrganizationModal( package.Org ) );
+		menu.AddOption( "star", "Rate Map", () => Game.Overlay.ShowReviewModal( package ) );
+	}
+
+	public static async void LoadMap( Package package )
+	{
+		Assert.True( HasAuthority, "You do not have authority to start a game, only the party owner can do that." );
+
+		LaunchArguments.Map = null;
+
+		var filters = new Dictionary<string, string>
+		{
+			{ "game", SANDBOX_IDENT },
+			{ "map", package.FullIdent },
+		};
+
+		var lobbies = await Networking.QueryLobbies( filters );
+
+		foreach ( var lobby in lobbies ) // TODO - order by most attractive
+		{
+			if ( lobby.IsFull ) continue;
+
+			if ( await Networking.TryConnectSteamId( lobby.LobbyId ) )
+				return;
+		}
+
+		CreateGameWithMap( SANDBOX_IDENT, package );
+	}
+
+	public static void CreateGameWithMap( string gameIdent, Package mapPackage )
+	{
+		Assert.True( HasAuthority, "You do not have authority to start a game, only the party owner can do that." );
+
+		LaunchArguments.Map = mapPackage.FullIdent;
+		MenuUtility.OpenGame( gameIdent, false );
+	}
+
+	public static void LaunchGame( string gameIdent, bool allowLaunchOverride = true )
+	{
+		// alex: in VR we don't show modals properly (this needs some thought as to how we're going to do it)
+		// so for the purposes of being able to play tech jam games, we'll just launch games directly
+		if ( Application.IsVR )
+		{
+			MenuUtility.OpenGame( gameIdent, true );
+			return;
+		}
+
+		Game.Overlay.ShowGameModal( gameIdent );
+	}
+}

@@ -1,0 +1,37 @@
+@using System;
+@using Sandbox;
+@using Sandbox.UI;
+@using MenuProject.MenuUI.Front;
+@inherits Panel
+
+<root>
+
+    @* A scene behind your citizen *@
+    <div class="backdrop"></div>
+
+    @* Your citizen, filling the card - spin them round, and they watch the cursor *@
+    <CitizenPreview class="portrait" LocalUser="@true" Interactive="@true" />
+
+    <div class="info">
+        <label class="eyebrow">Welcome back,</label>
+        <label class="name">@Sandbox.Utility.Steam.PersonaName</label>
+    </div>
+
+    <div class="edit clicky" tooltip="Edit your avatar" @onclick="@OpenAvatarScene">
+        <icon>emoji_people</icon>
+        <label>Edit</label>
+    </div>
+
+</root>
+
+@code
+{
+    void OpenAvatarScene()
+    {
+        var options = new SceneLoadOptions();
+        options.ShowLoadingScreen = false;
+        options.SetScene( "/scenes/avatar.scene" );
+
+        Game.ActiveScene.Load( options );
+    }
+}

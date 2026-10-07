@@ -1,0 +1,165 @@
+﻿using NativeEngine;
+
+namespace Sandbox.Rendering;
+
+/// <summary>
+/// Start moving the c++ render pipeline here
+/// It won't be the prettiest to start, but we can start simplifying afterwards
+/// </summary>
+internal partial class RenderPipeline
+{
+
+	DepthNormalPrepassLayer[] DepthNormalPrepasses { get; } =
+	[
+		new DepthNormalPrepassLayer( DepthNormalPrepassLayer.PrepassMode.Overlay ),
+		new DepthNormalPrepassLayer( DepthNormalPrepassLayer.PrepassMode.Large ),
+		new DepthNormalPrepassLayer( DepthNormalPrepassLayer.PrepassMode.Small ),
+	];
+	LightbinnerLayer LightbinnerLayer { get; } = new();
+	DepthDownsampleLayer DepthDownsampleLayer { get; } = new();
+	MotionVectorLayer MotionVectorLayer { get; } = new();
+	MotionVectorDebugLayer MotionVectorDebugLayer { get; } = new();
+	ReactiveDepthLayer ReactiveDepthViewmodel { get; } = new( "Reactive Depth (Viewmodel)", SceneObjectFlags.ViewModelLayer );
+	ReactiveDepthLayer ReactiveDepthOverlay { get; } = new( "Reactive Depth (Overlay)", SceneObjectFlags.GameOverlayLayer, clearDepth: false );
+	ReactiveMaskLayer ReactiveMaskLayer { get; } = new();
+	ReactiveMaskDebugLayer ReactiveMaskDebugLayer { get; } = new();
+	ClusteredCullingLayer ClusteredCullingLayer { get; } = new();
+	BloomLayer BloomLayer { get; } = new();
+	BloomDownsampleLayer BloomDownsampleLayer { get; } = new();
+	RefractionStencilLayer RefractionStencilLayer { get; } = new();
+	QuarterDepthDownsampleLayer QuarterDepthDownsampleLayer { get; } = new();
+
+	internal void AddLayersToView( ISceneView view, RenderViewport viewport, SceneViewRenderTargetHandle rtColor, SceneViewRenderTargetHandle rtDepth, RenderMultisampleType nMSAA, CRenderAttributes pipelineAttrs, RenderViewport screenSize )
+	{
+		var msaa = nMSAA.FromEngine();
+		var pipelineAttributes = new RenderAttributes( pipelineAttrs );
+
+		// renderingpipeline_standard.cpp:1786
+		// Already run: clear layer
+
+		{
+			LightbinnerLayer.Setup( pipelineAttributes );
+			LightbinnerLayer.AddToView( view, viewport );
+
+			ClusteredCullingLayer.Setup( view, viewport );
+			ClusteredCullingLayer.AddToView( view, viewport );
+		}
+
+		view.GetRenderAttributesPtr().SetIntValue( "ShadowFilterQuality", ShadowMapper.ShadowFilter );
+
+		// Depth Prepass with a small GBuffer ( Normals, Roughness )
+		{
+			var gbufferColor = RenderTarget.GetTemporary(
+				(int)screenSize.Rect.Width,
+				(int)screenSize.Rect.Height,
+				colorFormat: ImageFormat.RGBA16161616F,
+				depthFormat: ImageFormat.None,
+				msaa: msaa );
+
+			//
+			// Two layer depth prepass, initial layer renders fewer larger objects, second layer renders everything else
+			// matt: I don't think this makes sense anymore, Valve used to do it to opt out of smaller objects entirely.
+			//       However doing 1 big pass seems to double draw calls, it's possible it's not rendering everything?
+			//
+			bool disableDepthPrepassCulling = view.GetRenderAttributesPtr().GetBoolValue( "NoPrepassCulling", false );
+
+			foreach ( var prepass in DepthNormalPrepasses )
+			{
+				prepass.Setup( view, gbufferColor, rtDepth );
+				var layer = prepass.AddToView( view, viewport );
+
+				// Overlay writes the stencil bit at its real depth; every other prepass tests it so
+				// their (potentially nearer) depth can't overwrite pixels the overlay already claimed.
+				layer.SetOverlayStencil( prepass.Mode == DepthNormalPrepassLayer.PrepassMode.Overlay );
+
+				if ( prepass.CullThresholdPercent == 0 )
+					continue;
+
+				layer.SetBoundingVolumeSizeCullThresholdInPercent( prepass.CullThresholdPercent );
+				layer.SetLayerNoCull( disableDepthPrepassCulling );
+			}
+
+			// Pass that DepthNormals are enabled to the rest of the pipeline
+			view.GetRenderAttributesPtr().SetIntValue( "NormalsTextureIndex", gbufferColor.ColorTarget.Index );
+			view.GetRenderAttributesPtr().SetTextureValue( "NormalsGBuffer", gbufferColor.ColorTarget.native, -1 );
+		}
+
+		// Compute Async: Depth downscale, clustered culling
+		{
+			DepthDownsampleLayer.Setup( viewport, rtDepth, msaaInput: msaa != MultisampleAmount.MultisampleNone, view );
+			DepthDownsampleLayer.AddToView( view, viewport );
+		}
+
+		// Render motion vectors if something asks for it, e.g FSR3 or DLSS
+		if ( view.GetRenderAttributesPtr().GetBoolValue( "WantsMotionVectors", false ) )
+		{
+			MotionVectorLayer.Setup( viewport, view );
+			MotionVectorLayer.AddToView( view, viewport );
+
+			// Reactive mask: re-render viewmodel and overlay objects in depth-only mode,
+			// then convert to an R16F mask that tells FSR3 to prefer current-frame
+			// data for these pixels (they have no valid motion vectors).
+			var reactiveDepthHandle = ReactiveMaskLayer.Setup( viewport, view );
+
+			ReactiveDepthViewmodel.Setup( reactiveDepthHandle );
+			ReactiveDepthViewmodel.AddToView( view, viewport );
+
+			ReactiveDepthOverlay.Setup( reactiveDepthHandle );
+			ReactiveDepthOverlay.AddToView( view, viewport );
+
+			ReactiveMaskLayer.AddToView( view, viewport );
+		}
+
+		// Bloom layer, Effects that only show up on bloom like a ghost effect
+		{
+			RenderViewport quarterViewport = viewport / 4;
+
+			var bloomRt = BloomLayer.GetTarget( (int)quarterViewport.Rect.Width, (int)quarterViewport.Rect.Height );
+
+			QuarterDepthDownsampleLayer.Setup( view, quarterViewport, rtDepth, msaa != MultisampleAmount.MultisampleNone, bloomRt );
+			QuarterDepthDownsampleLayer.AddToView( view, quarterViewport );
+
+			BloomLayer.Setup( view, bloomRt );
+			BloomLayer.AddToView( view, quarterViewport );
+
+			view.GetRenderAttributesPtr().SetTextureValue( "QuarterResEffectsBloomInputTexture", bloomRt.ColorTarget.native, -1 );
+
+			BloomDownsampleLayer.RT = bloomRt;
+			BloomDownsampleLayer.AddToView( view, quarterViewport );
+		}
+
+		// Refraction stencil layer, used for filtering out depth on Framebuffer copies
+		{
+			RenderViewport quarterViewport = viewport / 4;
+			RefractionStencilLayer.Setup( view, quarterViewport );
+			RefractionStencilLayer.AddToView( view, quarterViewport );
+		}
+
+		// Opaque pass
+		// Transparent pass
+		// Etc.
+	}
+
+	internal void PipelineEnd( ISceneView view, RenderViewport viewport, SceneViewRenderTargetHandle rtColor, SceneViewRenderTargetHandle rtDepth, RenderMultisampleType nMSAA, CRenderAttributes pipelineAttrs, RenderViewport screenSize )
+	{
+		var pipelineAttributes = new RenderAttributes( pipelineAttrs );
+
+		// Motion vector debug visualization - blit to color buffer after scene is rendered
+		if ( pipelineAttributes.GetInt( "ToolsVisMode" ) == (int)SceneCameraDebugMode.MotionVectors )
+		{
+			MotionVectorDebugLayer.ColorAttachment = rtColor;
+			MotionVectorDebugLayer.AddToView( view, viewport );
+		}
+
+		// Reactive mask debug visualization
+		if ( pipelineAttributes.GetInt( "ToolsVisMode" ) == (int)SceneCameraDebugMode.ReactiveMask )
+		{
+			ReactiveMaskDebugLayer.ColorAttachment = rtColor;
+			ReactiveMaskDebugLayer.AddToView( view, viewport );
+		}
+
+		var cameraId = view.m_ManagedCameraId;
+		if ( cameraId == 0 )
+			return;
+	}
+}
