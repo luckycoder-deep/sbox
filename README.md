@@ -1,31 +1,4 @@
-<div align="center">
-  <img src="https://sbox.game/img/sbox-logo-square.svg" width="80px" alt="s&box logo">
 
-  [Website] | [Getting Started] | [Forums] | [Documentation] | [Contributing]
-</div>
-
-[Website]: https://sbox.game/
-[Getting Started]: https://sbox.game/learn/getting-started
-[Forums]: https://sbox.game/f/
-[Documentation]: https://sbox.game/dev/doc/
-[Contributing]: CONTRIBUTING.md
-
-# s&box
-
-[s&box](https://sbox.game) is a modern game engine, built on Valve's Source 2 and the latest .NET technology, it provides a modern intuitive editor for creating games.
-
-![s&box editor](https://cdn.sbox.game/about/editor.webp)
-
-If your goal is to create games using s&box, please start with [getting started guide](https://sbox.game/learn/getting-started).
-This repository is for building the engine from source for those who want to contribute to the development of the engine.
-
-## Getting the engine
-
-### Steam
-
-You can download and install the s&box editor directly from [Steam](https://store.steampowered.com/app/590830/sbox/).
-
-### Compiling from source
 
 This repository contains the C# engine, editor, tooling and game content. The native Source 2 core is
 distributed as prebuilt binaries that setup downloads for your platform, so no C++ toolchain is needed.
@@ -38,10 +11,7 @@ distributed as prebuilt binaries that setup downloads for your platform, so no C
 
 #### Prerequisites
 
-* [Git](https://git-scm.com/downloads)
-* [.NET 10 SDK](https://dotnet.microsoft.com/en-us/download)
-* An IDE for the C# code is recommended: [Visual Studio 2026](https://visualstudio.microsoft.com/) or
-  [Rider](https://www.jetbrains.com/rider/) on Windows, Rider or [VS Code](https://code.visualstudio.com/) on Linux and macOS.
+
 
 #### Setup
 
